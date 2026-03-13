@@ -112,7 +112,7 @@ def upsert_session(
     x_session_id: str | None = Cookie(default=None, alias=COOKIE_NAME),
 ) -> Response:
     if is_valid_sid(x_session_id) and refresh_session(x_session_id):
-        response.status_code = status.HTTP_200_OK
+        response = Response(content="", status_code=status.HTTP_200_OK)
         set_session_cookie(response, x_session_id)
         return response
 
