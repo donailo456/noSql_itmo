@@ -117,7 +117,7 @@ def upsert_session(
         return response
 
     sid = create_session()
-    response.status_code = status.HTTP_201_CREATED
+    response = Response(content="", status_code=status.HTTP_201_CREATED)
     set_session_cookie(response, sid)
     return response
 
