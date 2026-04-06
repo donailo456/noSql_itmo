@@ -24,11 +24,11 @@ def get_env_variable(name: str, default: str | None = None) -> str:
 
 APP_HOST = get_env_variable("APP_HOST")
 APP_PORT = int(get_env_variable("APP_PORT"))
-APP_USER_SESSION_TTL = int(get_env_variable("APP_USER_SESSION_TTL", "60"))
-REDIS_HOST = get_env_variable("REDIS_HOST", "redis")
-REDIS_PORT = int(get_env_variable("REDIS_PORT", "6379"))
-REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "")
-REDIS_DB = int(get_env_variable("REDIS_DB", "0"))
+APP_USER_SESSION_TTL = int(get_env_variable("APP_USER_SESSION_TTL"))
+REDIS_HOST = get_env_variable("REDIS_HOST")
+REDIS_PORT = int(get_env_variable("REDIS_PORT"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+REDIS_DB = int(get_env_variable("REDIS_DB"))
 
 redis_client = redis.Redis(
     host=REDIS_HOST,
