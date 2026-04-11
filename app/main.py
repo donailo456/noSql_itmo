@@ -53,9 +53,8 @@ redis_client = redis.Redis(
 
 mongo_uri = (
     f"mongodb://{MONGODB_USER}:{MONGODB_PASSWORD}"
-    f"@{MONGODB_HOST}:{MONGODB_PORT}/?authSource=admin"
+    f"@{MONGODB_HOST}:{MONGODB_PORT}/{MONGODB_DATABASE}"
 )
-
 mongo_client = MongoClient(mongo_uri)
 
 database = mongo_client[MONGODB_DATABASE]
