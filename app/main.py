@@ -269,12 +269,15 @@ async def login(
 ) -> Response:
     body = parse_json_body(await request.body())
     if body is None:
-        return json_error("invalid credentials", status.HTTP_401_UNAUTHORIZED, x_session_id, refresh=True)
+        return json_error('invalid "body" field', status.HTTP_400_BAD_REQUEST, x_session_id, refresh=True)
 
     username = get_non_empty_string(body, "username")
+    if username is None:
+        return json_error('invalid "username" field', status.HTTP_400_BAD_REQUEST, x_session_id, refresh=True)
+
     password = get_non_empty_string(body, "password")
-    if username is None or password is None:
-        return json_error("invalid credentials", status.HTTP_401_UNAUTHORIZED, x_session_id, refresh=True)
+    if password is None:
+        return json_error('invalid "password" field', status.HTTP_400_BAD_REQUEST, x_session_id, refresh=True)
 
     user = users_collection.find_one({"username": username})
     if user is None:
@@ -295,9 +298,12 @@ async def login(
 
 @app.post("/auth/logout")
 def logout(x_session_id: str | None = Cookie(default=None, alias=COOKIE_NAME)) -> Response:
+    if x_session_id is None or not refresh_session(x_session_id):
+        return Response(content=b"", status_code=status.HTTP_401_UNAUTHORIZED)
+
     delete_session(x_session_id)
     response = Response(content=b"", status_code=status.HTTP_204_NO_CONTENT)
-    delete_session_cookie(response, x_session_id or "")
+    delete_session_cookie(response, x_session_id)
     return response
 
 @app.post("/events")
