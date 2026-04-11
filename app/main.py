@@ -51,13 +51,12 @@ redis_client = redis.Redis(
     decode_responses=True,
 )
 
-mongo_client = MongoClient(
-    host=MONGODB_HOST,
-    port=MONGODB_PORT,
-    username=MONGODB_USER,
-    password=MONGODB_PASSWORD,
-    tz_aware=False,
+mongo_uri = (
+    f"mongodb://{MONGODB_USER}:{MONGODB_PASSWORD}"
+    f"@{MONGODB_HOST}:{MONGODB_PORT}/?authSource=admin"
 )
+
+mongo_client = MongoClient(mongo_uri)
 
 database = mongo_client[MONGODB_DATABASE]
 users_collection: Collection = database["users"]
