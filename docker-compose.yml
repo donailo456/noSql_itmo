@@ -1,4 +1,3 @@
-version: "3.9"
 services:
   app:
     build:
@@ -8,6 +7,7 @@ services:
       - .env.local
     depends_on:
       - redis
+      - mongo
     ports:
       - "${APP_PORT}:${APP_PORT}"
 
@@ -18,3 +18,15 @@ services:
       - .env.local
     ports:
       - "${REDIS_PORT}:${REDIS_PORT}"
+
+  mongo:
+    image: mongo:7
+    restart: always
+    env_file:
+      - .env.local
+    ports:
+      - "${MONGODB_PORT}:${MONGODB_PORT}"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_PASSWORD}
+    command: ["--port", "${MONGODB_PORT}"]
