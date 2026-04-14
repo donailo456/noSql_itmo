@@ -1,9 +1,35 @@
-version: "3.9"
-
 services:
   app:
-    build: .
+    build:
+      context: .
+      dockerfile: dockerfile
+    env_file:
+      - .env.local
+    depends_on:
+      - redis
+      - mongo
+    ports:
+      - "${APP_PORT}:${APP_PORT}"
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "no"]
     env_file:
       - .env.local
     ports:
-      - "${APP_PORT}:${APP_PORT}"
+      - "${REDIS_PORT}:${REDIS_PORT}"
+
+  mongo:
+    image: mongo:7
+    restart: always
+    env_file:
+      - .env.local
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_ROOT_USER}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGODB_DATABASE}
+    ports:
+      - "${MONGODB_PORT}:${MONGODB_PORT}"
+    command: ["--port", "${MONGODB_PORT}"]
+    volumes:
+      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
