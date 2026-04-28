@@ -66,6 +66,48 @@ done
 
 sleep 10
 
+echo "=== Waiting for Shard 1 PRIMARY ==="
+for i in {1..60}; do
+  RESULT=$(mongosh --host shard1svr1 --port 27020 --quiet --eval "
+    try {
+      const status = rs.status();
+      const primary = status.members.find(m => m.stateStr === 'PRIMARY');
+      print(primary ? 'true' : 'false');
+    } catch (e) {
+      print('false');
+    }
+  " 2>/dev/null || true)
+
+  if echo "$RESULT" | grep -q "true"; then
+    echo "Shard 1 PRIMARY is ready"
+    break
+  fi
+
+  echo "Waiting for shard 1 PRIMARY... attempt $i"
+  sleep 2
+done
+
+echo "=== Waiting for Shard 2 PRIMARY ==="
+for i in {1..60}; do
+  RESULT=$(mongosh --host shard2svr1 --port 27023 --quiet --eval "
+    try {
+      const status = rs.status();
+      const primary = status.members.find(m => m.stateStr === 'PRIMARY');
+      print(primary ? 'true' : 'false');
+    } catch (e) {
+      print('false');
+    }
+  " 2>/dev/null || true)
+
+  if echo "$RESULT" | grep -q "true"; then
+    echo "Shard 2 PRIMARY is ready"
+    break
+  fi
+
+  echo "Waiting for shard 2 PRIMARY... attempt $i"
+  sleep 2
+done
+
 echo "=== Adding Shards via Mongos ==="
 
 for i in {1..30}; do

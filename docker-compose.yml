@@ -6,8 +6,12 @@ services:
     env_file:
       - .env.local
     depends_on:
-      - redis
-      - mongos
+      redis:
+        condition: service_started
+      mongos:
+        condition: service_started
+      mongo-init:
+        condition: service_completed_successfully
     ports:
       - "${APP_PORT}:${APP_PORT}"
 
@@ -19,7 +23,6 @@ services:
     ports:
       - "${REDIS_PORT}:${REDIS_PORT}"
 
-  # ==================== Config Server ====================
   cfgsvr1:
     image: mongo:7
     restart: always
@@ -28,7 +31,6 @@ services:
     volumes:
       - cfgsvr1_data:/data/db
 
-  # ==================== Shard 1 (Replica Set: shard1ReplSet) ====================
   shard1svr1:
     image: mongo:7
     restart: always
@@ -53,7 +55,6 @@ services:
     volumes:
       - shard1svr3_data:/data/db
 
-  # ==================== Shard 2 (Replica Set: shard2ReplSet) ====================
   shard2svr1:
     image: mongo:7
     restart: always
@@ -78,7 +79,6 @@ services:
     volumes:
       - shard2svr3_data:/data/db
 
-  # ==================== Mongos (Router) ====================
   mongos:
     image: mongo:7
     restart: always
@@ -91,8 +91,9 @@ services:
       - shard1svr1
       - shard2svr1
 
-  # ==================== Init Container ====================
   mongo-init:
+    env_file:
+      - .env.local
     image: mongo:7
     restart: "no"
     depends_on:
