@@ -79,6 +79,8 @@ for _attempt in range(30):
     try:
         users_collection.create_index([("username", ASCENDING)], unique=True, name="username_unique")
         events_collection.create_index([("created_by", ASCENDING)], name="created_by")
+        events_collection.create_index([("title", ASCENDING)], unique=True, name="title_unique")
+        events_collection.create_index([("title", ASCENDING), ("created_by", ASCENDING)], name="title_created_by")
         break
     except Exception as e:
         print(f"Waiting for MongoDB indexes... attempt {_attempt + 1}: {e}", file=sys.stderr)
@@ -666,6 +668,16 @@ def get_user(
 @app.get("/users/{user_id}/events", response_model=None)
 def get_user_events(
     user_id: str,
+    title: str | None = None,
+    limit: str | None = None,
+    offset: str | None = None,
+    id: str | None = None,
+    category: str | None = None,
+    price_from: str | None = None,
+    price_to: str | None = None,
+    city: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
     x_session_id: str | None = Cookie(default=None, alias=COOKIE_NAME),
 ):
     if not ObjectId.is_valid(user_id):
@@ -679,7 +691,75 @@ def get_user_events(
         maybe_attach_existing_session_cookie(response, x_session_id)
         return response
 
-    events = [format_event(doc) for doc in events_collection.find({"created_by": user_id}).sort("_id", ASCENDING)]
+    limit_value, err = parse_uint_param(limit, "limit", x_session_id)
+    if err is not None:
+        return err
+
+    offset_value, err = parse_uint_param(offset, "offset", x_session_id)
+    if err is not None:
+        return err
+
+    query: dict[str, Any] = {
+        "created_by": user_id
+    }
+
+    if id is not None:
+        if not ObjectId.is_valid(id):
+            return json_error('invalid "id" field', status.HTTP_400_BAD_REQUEST, x_session_id)
+        query["_id"] = ObjectId(id)
+
+    if title is not None:
+        query["title"] = {"$regex": re.escape(title), "$options": "i"}
+
+    if category is not None:
+        if category not in VALID_CATEGORIES:
+            return json_error('invalid "category" field', status.HTTP_400_BAD_REQUEST, x_session_id)
+        query["category"] = category
+
+    price_conditions: dict[str, Any] = {}
+    if price_from is not None:
+        pf_val, err = parse_uint_param(price_from, "price_from", x_session_id)
+        if err is not None:
+            return err
+        if pf_val is not None:
+            price_conditions["$gte"] = pf_val
+
+    if price_to is not None:
+        pt_val, err = parse_uint_param(price_to, "price_to", x_session_id)
+        if err is not None:
+            return err
+        if pt_val is not None:
+            price_conditions["$lte"] = pt_val
+
+    if price_conditions:
+        query["price"] = price_conditions
+
+    if city is not None:
+        query["location.city"] = city
+
+    date_conditions: dict[str, Any] = {}
+    if date_from is not None:
+        dt_from, err = parse_yyyymmdd(date_from, "date_from", x_session_id)
+        if err is not None:
+            return err
+        if dt_from is not None:
+            date_conditions["$gte"] = dt_from.strftime("%Y-%m-%dT00:00:00")
+
+    if date_to is not None:
+        dt_to, err = parse_yyyymmdd(date_to, "date_to", x_session_id)
+        if err is not None:
+            return err
+        if dt_to is not None:
+            date_conditions["$lte"] = dt_to.strftime("%Y-%m-%dT23:59:59")
+
+    if date_conditions:
+        query["started_at"] = date_conditions
+
+    cursor = events_collection.find(query).sort("_id", ASCENDING).skip(offset_value or 0)
+    if limit_value and limit_value > 0:
+        cursor = cursor.limit(limit_value)
+
+    events = [format_event(doc) for doc in cursor]
 
     response = JSONResponse(content={"events": events, "count": len(events)}, status_code=status.HTTP_200_OK)
     maybe_attach_existing_session_cookie(response, x_session_id)
