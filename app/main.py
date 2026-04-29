@@ -78,9 +78,9 @@ for _attempt in range(60):
 for _attempt in range(30):
     try:
         users_collection.create_index([("username", ASCENDING)], unique=True, name="username_unique")
-        events_collection.create_index([("created_by", ASCENDING)], name="created_by")
-        events_collection.create_index([("title", ASCENDING)], unique=True, name="title_unique")
+        events_collection.create_index([("title", ASCENDING)], name="title")
         events_collection.create_index([("title", ASCENDING), ("created_by", ASCENDING)], name="title_created_by")
+        events_collection.create_index([("created_by", ASCENDING)], name="created_by")
         break
     except Exception as e:
         print(f"Waiting for MongoDB indexes... attempt {_attempt + 1}: {e}", file=sys.stderr)
