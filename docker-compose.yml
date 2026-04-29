@@ -92,10 +92,10 @@ services:
       - shard2svr1
 
   mongo-init:
-    env_file:
-      - .env.local
     image: mongo:7
     restart: "no"
+    env_file:
+      - .env.local
     depends_on:
       - mongos
       - cfgsvr1

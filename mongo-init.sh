@@ -154,3 +154,16 @@ mongosh --host mongos --port 27017 --quiet --eval "
 " 2>&1 || echo "events collection may already be sharded"
 
 echo "=== Sharding initialization complete ==="
+
+echo "=== Creating app user ==="
+
+mongosh --host mongos --port 27017 <<EOF
+use ${MONGODB_DATABASE}
+if (!db.getUser("${MONGODB_USER}")) {
+  db.createUser({
+    user: "${MONGODB_USER}",
+    pwd: "${MONGODB_PASSWORD}",
+    roles: [{ role: "readWrite", db: "${MONGODB_DATABASE}" }]
+  })
+}
+EOF

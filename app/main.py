@@ -53,7 +53,8 @@ redis_client = redis.Redis(
 )
 
 mongo_uri = (
-    f"mongodb://{MONGODB_HOST}:{MONGODB_PORT}/{MONGODB_DATABASE}"
+    f"mongodb://{MONGODB_USER}:{MONGODB_PASSWORD}"
+    f"@{MONGODB_HOST}:{MONGODB_PORT}/{MONGODB_DATABASE}"
 )
 mongo_client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
 
