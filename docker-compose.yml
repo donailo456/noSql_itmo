@@ -6,8 +6,12 @@ services:
     env_file:
       - .env.local
     depends_on:
-      - redis
-      - mongo
+      redis:
+        condition: service_started
+      mongos:
+        condition: service_started
+      mongo-init:
+        condition: service_completed_successfully
     ports:
       - "${APP_PORT}:${APP_PORT}"
 
@@ -19,17 +23,97 @@ services:
     ports:
       - "${REDIS_PORT}:${REDIS_PORT}"
 
-  mongo:
+  cfgsvr1:
     image: mongo:7
     restart: always
+    entrypoint: ["mongod"]
+    command: ["--configsvr", "--replSet", "cfgReplSet", "--port", "27019", "--bind_ip_all"]
+    volumes:
+      - cfgsvr1_data:/data/db
+
+  shard1svr1:
+    image: mongo:7
+    restart: always
+    entrypoint: ["mongod"]
+    command: ["--shardsvr", "--replSet", "shard1ReplSet", "--port", "27020", "--bind_ip_all"]
+    volumes:
+      - shard1svr1_data:/data/db
+
+  shard1svr2:
+    image: mongo:7
+    restart: always
+    entrypoint: ["mongod"]
+    command: ["--shardsvr", "--replSet", "shard1ReplSet", "--port", "27021", "--bind_ip_all"]
+    volumes:
+      - shard1svr2_data:/data/db
+
+  shard1svr3:
+    image: mongo:7
+    restart: always
+    entrypoint: ["mongod"]
+    command: ["--shardsvr", "--replSet", "shard1ReplSet", "--port", "27022", "--bind_ip_all"]
+    volumes:
+      - shard1svr3_data:/data/db
+
+  shard2svr1:
+    image: mongo:7
+    restart: always
+    entrypoint: ["mongod"]
+    command: ["--shardsvr", "--replSet", "shard2ReplSet", "--port", "27023", "--bind_ip_all"]
+    volumes:
+      - shard2svr1_data:/data/db
+
+  shard2svr2:
+    image: mongo:7
+    restart: always
+    entrypoint: ["mongod"]
+    command: ["--shardsvr", "--replSet", "shard2ReplSet", "--port", "27024", "--bind_ip_all"]
+    volumes:
+      - shard2svr2_data:/data/db
+
+  shard2svr3:
+    image: mongo:7
+    restart: always
+    entrypoint: ["mongod"]
+    command: ["--shardsvr", "--replSet", "shard2ReplSet", "--port", "27025", "--bind_ip_all"]
+    volumes:
+      - shard2svr3_data:/data/db
+
+  mongos:
+    image: mongo:7
+    restart: always
+    entrypoint: ["mongos"]
+    command: ["--configdb", "cfgReplSet/cfgsvr1:27019", "--port", "27017", "--bind_ip_all"]
+    ports:
+      - "${MONGODB_PORT}:27017"
+    depends_on:
+      - cfgsvr1
+      - shard1svr1
+      - shard2svr1
+
+  mongo-init:
+    image: mongo:7
+    restart: "no"
     env_file:
       - .env.local
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: ${MONGODB_ROOT_USER}
-      MONGO_INITDB_ROOT_PASSWORD: ${MONGODB_ROOT_PASSWORD}
-      MONGO_INITDB_DATABASE: ${MONGODB_DATABASE}
-    ports:
-      - "${MONGODB_PORT}:${MONGODB_PORT}"
-    command: ["--port", "${MONGODB_PORT}"]
+    depends_on:
+      - mongos
+      - cfgsvr1
+      - shard1svr1
+      - shard1svr2
+      - shard1svr3
+      - shard2svr1
+      - shard2svr2
+      - shard2svr3
     volumes:
-      - ./mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+      - ./mongo-init.sh:/mongo-init.sh:ro
+    entrypoint: ["/bin/bash", "/mongo-init.sh"]
+
+volumes:
+  cfgsvr1_data:
+  shard1svr1_data:
+  shard1svr2_data:
+  shard1svr3_data:
+  shard2svr1_data:
+  shard2svr2_data:
+  shard2svr3_data:
