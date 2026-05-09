@@ -400,7 +400,14 @@ def attach_reactions(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def invalidate_reactions_cache(title: str) -> None:
-    redis_client.delete(reaction_cache_key(title))
+    event_ids = get_reaction_event_ids_by_title(title)
+    reactions = get_reactions_from_cassandra(event_ids)
+
+    redis_client.setex(
+        reaction_cache_key(title),
+        APP_LIKE_TTL,
+        json.dumps(reactions),
+    )
 
 def format_user(document: dict[str, Any]) -> dict[str, Any]:
     """Format a MongoDB user document into the API response format (without password_hash)."""
