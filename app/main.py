@@ -1,13 +1,20 @@
+import hashlib
+import json
 import os
 import re
 import secrets
 import sys
+import time as _time
 from datetime import datetime, timezone
 from typing import Any, Final
 
 import bcrypt
 import redis
 import uvicorn
+from cassandra import ConsistencyLevel
+from cassandra.auth import PlainTextAuthProvider
+from cassandra.cluster import Cluster
+from cassandra.query import SimpleStatement
 from bson import ObjectId
 from fastapi import Cookie, FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -43,6 +50,13 @@ MONGODB_USER = get_env_variable("MONGODB_USER")
 MONGODB_PASSWORD = get_env_variable("MONGODB_PASSWORD")
 MONGODB_HOST = get_env_variable("MONGODB_HOST")
 MONGODB_PORT = int(get_env_variable("MONGODB_PORT"))
+APP_LIKE_TTL = int(get_env_variable("APP_LIKE_TTL"))
+CASSANDRA_HOSTS = get_env_variable("CASSANDRA_HOSTS").split(",")
+CASSANDRA_PORT = int(get_env_variable("CASSANDRA_PORT"))
+CASSANDRA_USERNAME = os.getenv("CASSANDRA_USERNAME")
+CASSANDRA_PASSWORD = os.getenv("CASSANDRA_PASSWORD")
+CASSANDRA_KEYSPACE = get_env_variable("CASSANDRA_KEYSPACE")
+CASSANDRA_CONSISTENCY = get_env_variable("CASSANDRA_CONSISTENCY")
 
 redis_client = redis.Redis(
     password=REDIS_PASSWORD or None,
@@ -62,7 +76,6 @@ database = mongo_client[MONGODB_DATABASE]
 users_collection: Collection = database["users"]
 events_collection: Collection = database["events"]
 
-import time as _time
 for _attempt in range(60):
     try:
         result = mongo_client.admin.command("listShards")
@@ -85,6 +98,79 @@ for _attempt in range(30):
     except Exception as e:
         print(f"Waiting for MongoDB indexes... attempt {_attempt + 1}: {e}", file=sys.stderr)
         _time.sleep(5)
+
+def get_cassandra_consistency() -> int:
+    from cassandra import ConsistencyLevel
+
+    return getattr(ConsistencyLevel, CASSANDRA_CONSISTENCY)
+
+
+auth_provider = None
+if CASSANDRA_USERNAME and CASSANDRA_PASSWORD:
+    auth_provider = PlainTextAuthProvider(
+        username=CASSANDRA_USERNAME,
+        password=CASSANDRA_PASSWORD,
+    )
+
+cassandra_cluster = None
+cassandra_session = None
+
+for _attempt in range(60):
+    try:
+        cassandra_cluster = Cluster(
+            contact_points=CASSANDRA_HOSTS,
+            port=CASSANDRA_PORT,
+            auth_provider=auth_provider,
+        )
+
+        cassandra_session = cassandra_cluster.connect()
+
+        cassandra_session.execute(
+            f"""
+            CREATE KEYSPACE IF NOT EXISTS {CASSANDRA_KEYSPACE}
+            WITH replication = {{
+                'class': 'SimpleStrategy',
+                'replication_factor': 1
+            }}
+            """
+        )
+
+        cassandra_session.set_keyspace(CASSANDRA_KEYSPACE)
+
+        cassandra_session.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_reactions (
+                event_id text,
+                created_by text,
+                like_value tinyint,
+                created_at timestamp,
+                PRIMARY KEY ((event_id), created_by)
+            )
+            """
+        )
+
+        cassandra_session.execute(
+            """
+            CREATE INDEX IF NOT EXISTS event_reactions_like_value_idx
+            ON event_reactions (like_value)
+            """
+        )
+
+        print("Cassandra ready", file=sys.stderr)
+        break
+    except Exception as e:
+        print(f"Waiting for Cassandra... attempt {_attempt + 1}: {e}", file=sys.stderr)
+
+        if cassandra_cluster is not None:
+            cassandra_cluster.shutdown()
+
+        cassandra_session = None
+        cassandra_cluster = None
+        _time.sleep(5)
+
+if cassandra_session is None:
+    print("ERROR: Cassandra is not ready", file=sys.stderr)
+    sys.exit(1)
 
 CREATE_SESSION_SCRIPT = redis_client.register_script(
     """
@@ -247,6 +333,74 @@ def format_event(document: dict[str, Any]) -> dict[str, Any]:
     if "price" in document:
         result["price"] = document["price"]
     return result
+
+
+def zero_reactions() -> dict[str, int]:
+    return {"likes": 0, "dislikes": 0}
+
+
+def reaction_cache_key(title: str) -> str:
+    title_hash = hashlib.md5(title.encode("utf-8")).hexdigest()
+    return f"event:{title_hash}:reactions"
+
+
+def get_reaction_event_ids_by_title(title: str) -> list[str]:
+    docs = events_collection.find({"title": title}, {"_id": 1})
+    return [str(doc["_id"]) for doc in docs]
+
+
+def get_reactions_from_cassandra(event_ids: list[str]) -> dict[str, int]:
+    if not event_ids:
+        return zero_reactions()
+
+    likes = 0
+    dislikes = 0
+    statement = SimpleStatement(
+        "SELECT like_value FROM event_reactions WHERE event_id = %s",
+        consistency_level=get_cassandra_consistency(),
+    )
+
+    for event_id in event_ids:
+        rows = cassandra_session.execute(statement, (event_id,))
+        for row in rows:
+            if row.like_value == 1:
+                likes += 1
+            elif row.like_value == -1:
+                dislikes += 1
+
+    return {"likes": likes, "dislikes": dislikes}
+
+
+def get_reactions_by_title(title: str) -> dict[str, int]:
+    key = reaction_cache_key(title)
+    cached = redis_client.get(key)
+
+    if cached:
+        try:
+            data = json.loads(cached)
+            return {
+                "likes": int(data.get("likes", 0)),
+                "dislikes": int(data.get("dislikes", 0)),
+            }
+        except Exception:
+            redis_client.delete(key)
+
+    event_ids = get_reaction_event_ids_by_title(title)
+    reactions = get_reactions_from_cassandra(event_ids)
+
+    if reactions["likes"] > 0 or reactions["dislikes"] > 0:
+        redis_client.setex(key, APP_LIKE_TTL, json.dumps(reactions))
+
+    return reactions
+
+
+def attach_reactions(event: dict[str, Any]) -> dict[str, Any]:
+    event["reactions"] = get_reactions_by_title(event.get("title", ""))
+    return event
+
+
+def invalidate_reactions_cache(title: str) -> None:
+    redis_client.delete(reaction_cache_key(title))
 
 def format_user(document: dict[str, Any]) -> dict[str, Any]:
     """Format a MongoDB user document into the API response format (without password_hash)."""
@@ -420,10 +574,6 @@ async def create_event(
         "finished_at": finished_at,
     }
 
-    existing = events_collection.find_one({"title": title, "created_by": user_id})
-    if existing is not None:
-        return json_error("event already exists", status.HTTP_409_CONFLICT, sid)
-
     result = events_collection.insert_one(event_document)
 
     response = JSONResponse(content={"id": str(result.inserted_id)}, status_code=status.HTTP_201_CREATED)
@@ -433,6 +583,7 @@ async def create_event(
 @app.get("/events", response_model=None)
 def get_events(
     title: str | None = None,
+    include: str | None = None,
     limit: str | None = None,
     offset: str | None = None,
     id: str | None = None,
@@ -516,6 +667,8 @@ def get_events(
         cursor = cursor.limit(limit_value)
 
     events = [format_event(doc) for doc in cursor]
+    if include == "reactions":
+        events = [attach_reactions(event) for event in events]
 
     response = JSONResponse(content={"events": events, "count": len(events)}, status_code=status.HTTP_200_OK)
     maybe_attach_existing_session_cookie(response, x_session_id)
@@ -525,6 +678,7 @@ def get_events(
 @app.get("/events/{event_id}", response_model=None)
 def get_event(
     event_id: str,
+    include: str | None = None,
     x_session_id: str | None = Cookie(default=None, alias=COOKIE_NAME),
 ):
     if not ObjectId.is_valid(event_id):
@@ -539,6 +693,9 @@ def get_event(
         return response
 
     result = format_event(document)
+    if include == "reactions":
+        result = attach_reactions(result)
+
     response = JSONResponse(content=result, status_code=status.HTTP_200_OK)
     maybe_attach_existing_session_cookie(response, x_session_id)
     return response
@@ -669,6 +826,7 @@ def get_user(
 def get_user_events(
     user_id: str,
     title: str | None = None,
+    include: str | None = None,
     limit: str | None = None,
     offset: str | None = None,
     id: str | None = None,
@@ -760,10 +918,74 @@ def get_user_events(
         cursor = cursor.limit(limit_value)
 
     events = [format_event(doc) for doc in cursor]
+    if include == "reactions":
+        events = [attach_reactions(event) for event in events]
 
     response = JSONResponse(content={"events": events, "count": len(events)}, status_code=status.HTTP_200_OK)
     maybe_attach_existing_session_cookie(response, x_session_id)
     return response
+
+
+def authorized_user_id_from_session(sid: str | None) -> str | None:
+    session_data = get_session_data(sid)
+    if not session_data:
+        return None
+    return session_data.get("user_id")
+
+
+def set_event_reaction(event_id: str, user_id: str, like_value: int) -> None:
+    statement = SimpleStatement(
+        """
+        INSERT INTO event_reactions (event_id, created_by, like_value, created_at)
+        VALUES (%s, %s, %s, %s)
+        """,
+        consistency_level=get_cassandra_consistency(),
+    )
+    cassandra_session.execute(
+        statement,
+        (
+            event_id,
+            user_id,
+            like_value,
+            datetime.now(timezone.utc),
+        ),
+    )
+
+
+def react_to_event(event_id: str, like_value: int, x_session_id: str | None) -> Response:
+    sid = maybe_refresh_post_session(x_session_id)
+    user_id = authorized_user_id_from_session(sid)
+
+    if sid is None or user_id is None:
+        return Response(content=b"", status_code=status.HTTP_401_UNAUTHORIZED)
+
+    if not ObjectId.is_valid(event_id):
+        return json_error("Event not found", status.HTTP_404_NOT_FOUND, sid)
+
+    event = events_collection.find_one({"_id": ObjectId(event_id)})
+    if event is None:
+        return json_error("Event not found", status.HTTP_404_NOT_FOUND, sid)
+
+    set_event_reaction(event_id, user_id, like_value)
+    invalidate_reactions_cache(event.get("title", ""))
+
+    return empty_response(status.HTTP_204_NO_CONTENT, sid)
+
+
+@app.post("/events/{event_id}/like")
+def like_event(
+    event_id: str,
+    x_session_id: str | None = Cookie(default=None, alias=COOKIE_NAME),
+) -> Response:
+    return react_to_event(event_id, 1, x_session_id)
+
+
+@app.post("/events/{event_id}/dislike")
+def dislike_event(
+    event_id: str,
+    x_session_id: str | None = Cookie(default=None, alias=COOKIE_NAME),
+) -> Response:
+    return react_to_event(event_id, -1, x_session_id)
 
 
 if __name__ == "__main__":
