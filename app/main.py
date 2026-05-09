@@ -1,5 +1,4 @@
 import hashlib
-import json
 import os
 import re
 import secrets
@@ -373,23 +372,25 @@ def get_reactions_from_cassandra(event_ids: list[str]) -> dict[str, int]:
 
 def get_reactions_by_title(title: str) -> dict[str, int]:
     key = reaction_cache_key(title)
-    cached = redis_client.get(key)
+
+    try:
+        cached = redis_client.hgetall(key)
+    except redis.ResponseError:
+        redis_client.delete(key)
+        cached = {}
 
     if cached:
-        try:
-            data = json.loads(cached)
-            return {
-                "likes": int(data.get("likes", 0)),
-                "dislikes": int(data.get("dislikes", 0)),
-            }
-        except Exception:
-            redis_client.delete(key)
+        return {
+            "likes": int(cached.get("likes", 0)),
+            "dislikes": int(cached.get("dislikes", 0)),
+        }
 
     event_ids = get_reaction_event_ids_by_title(title)
     reactions = get_reactions_from_cassandra(event_ids)
 
     if reactions["likes"] > 0 or reactions["dislikes"] > 0:
-        redis_client.setex(key, APP_LIKE_TTL, json.dumps(reactions))
+        redis_client.hset(key, mapping=reactions)
+        redis_client.expire(key, APP_LIKE_TTL)
 
     return reactions
 
@@ -403,11 +404,10 @@ def invalidate_reactions_cache(title: str) -> None:
     event_ids = get_reaction_event_ids_by_title(title)
     reactions = get_reactions_from_cassandra(event_ids)
 
-    redis_client.setex(
-        reaction_cache_key(title),
-        APP_LIKE_TTL,
-        json.dumps(reactions),
-    )
+    key = reaction_cache_key(title)
+    redis_client.delete(key)
+    redis_client.hset(key, mapping=reactions)
+    redis_client.expire(key, APP_LIKE_TTL)
 
 def format_user(document: dict[str, Any]) -> dict[str, Any]:
     """Format a MongoDB user document into the API response format (without password_hash)."""
