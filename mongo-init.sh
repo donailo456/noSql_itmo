@@ -146,11 +146,24 @@ mongosh --host mongos --port 27017 --quiet --eval "
 
 sleep 2
 
+echo "=== Preparing events collection indexes ==="
+mongosh --host mongos --port 27017 --quiet --eval "
+  db = db.getSiblingDB('${MONGODB_DATABASE}');
+
+  db.events.createIndex(
+    { title: 1, created_by: 1 },
+    { name: 'title_created_by' }
+  );
+
+  db.events.createIndex(
+    { created_by: 'hashed' },
+    { name: 'created_by_hashed' }
+  );
+" 2>&1 || echo "events indexes may already exist"
+
 echo "=== Sharding events collection ==="
 mongosh --host mongos --port 27017 --quiet --eval "
-  db = db.getSiblingDB('eventhub');
-  db.events.createIndex({ created_by: 'hashed' });
-  sh.shardCollection('eventhub.events', { created_by: 'hashed' });
+  sh.shardCollection('${MONGODB_DATABASE}.events', { created_by: 'hashed' });
 " 2>&1 || echo "events collection may already be sharded"
 
 echo "=== Sharding initialization complete ==="
@@ -186,11 +199,6 @@ db.events.createIndex(
 db.events.createIndex(
   { created_by: 1 },
   { name: "created_by" }
-)
-
-db.events.createIndex(
-  { created_by: 1, title: 1 },
-  { name: "title_created_by" }
 )
 EOF
 
