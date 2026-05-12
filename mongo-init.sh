@@ -187,6 +187,11 @@ db.events.createIndex(
   { created_by: 1 },
   { name: "created_by" }
 )
+
+db.events.createIndex(
+  { created_by: 1, title: 1 },
+  { name: "title_created_by" }
+)
 EOF
 
 echo "=== MongoDB indexes created ==="
