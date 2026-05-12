@@ -167,3 +167,26 @@ if (!db.getUser("${MONGODB_USER}")) {
   })
 }
 EOF
+
+echo "=== Creating MongoDB indexes ==="
+
+mongosh --host mongos --port 27017 <<EOF
+use ${MONGODB_DATABASE}
+
+db.users.createIndex(
+  { username: 1 },
+  { unique: true, name: "username_unique" }
+)
+
+db.events.createIndex(
+  { title: 1 },
+  { name: "title" }
+)
+
+db.events.createIndex(
+  { created_by: 1 },
+  { name: "created_by" }
+)
+EOF
+
+echo "=== MongoDB indexes created ==="
