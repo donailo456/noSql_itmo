@@ -75,29 +75,6 @@ database = mongo_client[MONGODB_DATABASE]
 users_collection: Collection = database["users"]
 events_collection: Collection = database["events"]
 
-for _attempt in range(60):
-    try:
-        result = mongo_client.admin.command("listShards")
-        shard_count = len(result.get("shards", []))
-        if shard_count >= 2:
-            print(f"MongoDB cluster ready with {shard_count} shards", file=sys.stderr)
-            break
-        print(f"Waiting for shards... attempt {_attempt + 1}: found {shard_count} shards", file=sys.stderr)
-    except Exception as e:
-        print(f"Waiting for MongoDB to be ready... attempt {_attempt + 1}: {e}", file=sys.stderr)
-    _time.sleep(5)
-
-for _attempt in range(30):
-    try:
-        users_collection.create_index([("username", ASCENDING)], unique=True, name="username_unique")
-        events_collection.create_index([("title", ASCENDING)], name="title")
-        events_collection.create_index([("title", ASCENDING), ("created_by", ASCENDING)], name="title_created_by")
-        events_collection.create_index([("created_by", ASCENDING)], name="created_by")
-        break
-    except Exception as e:
-        print(f"Waiting for MongoDB indexes... attempt {_attempt + 1}: {e}", file=sys.stderr)
-        _time.sleep(5)
-
 def get_cassandra_consistency() -> int:
     from cassandra import ConsistencyLevel
 
@@ -170,6 +147,7 @@ for _attempt in range(60):
 if cassandra_session is None:
     print("ERROR: Cassandra is not ready", file=sys.stderr)
     sys.exit(1)
+
 
 CREATE_SESSION_SCRIPT = redis_client.register_script(
     """
