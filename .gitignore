@@ -42,6 +42,7 @@ logs/
 # Docker
 # ============================================
 docker-compose.override.yml
+mongo-keyfile
 
 # ============================================
 # Language-specific
