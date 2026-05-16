@@ -4,3 +4,4 @@ python-dotenv
 redis
 pymongo
 bcrypt
+cassandra-driver

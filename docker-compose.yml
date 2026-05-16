@@ -12,8 +12,20 @@ services:
         condition: service_started
       mongo-init:
         condition: service_completed_successfully
+      cassandra:
+        condition: service_started
     ports:
       - "${APP_PORT}:${APP_PORT}"
+
+  cassandra:
+    image: cassandra:4.1
+    restart: always
+    env_file:
+      - .env.local
+    ports:
+      - "${CASSANDRA_PORT}:9042"
+    volumes:
+      - cassandra_data:/var/lib/cassandra
 
   redis:
     image: redis:7-alpine
@@ -117,3 +129,4 @@ volumes:
   shard2svr1_data:
   shard2svr2_data:
   shard2svr3_data:
+  cassandra_data:
