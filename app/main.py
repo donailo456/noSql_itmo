@@ -1,4 +1,5 @@
 import hashlib
+import uuid
 import os
 import re
 import secrets
@@ -50,6 +51,7 @@ MONGODB_PASSWORD = get_env_variable("MONGODB_PASSWORD")
 MONGODB_HOST = get_env_variable("MONGODB_HOST")
 MONGODB_PORT = int(get_env_variable("MONGODB_PORT"))
 APP_LIKE_TTL = int(get_env_variable("APP_LIKE_TTL"))
+APP_EVENT_REVIEWS_TTL = int(get_env_variable("APP_EVENT_REVIEWS_TTL"))
 CASSANDRA_HOSTS = get_env_variable("CASSANDRA_HOSTS").split(",")
 CASSANDRA_PORT = int(get_env_variable("CASSANDRA_PORT"))
 CASSANDRA_USERNAME = os.getenv("CASSANDRA_USERNAME")
@@ -132,6 +134,35 @@ for _attempt in range(60):
             """
         )
 
+        cassandra_session.execute(
+            """
+            CREATE TABLE IF NOT EXISTS event_reviews (
+                event_id text,
+                created_at timestamp,
+                id uuid,
+                created_by text,
+                rating tinyint,
+                comment text,
+                updated_at timestamp,
+                PRIMARY KEY ((event_id), created_at, id)
+            ) WITH CLUSTERING ORDER BY (created_at DESC)
+            """
+        )
+
+        cassandra_session.execute(
+            """
+            CREATE INDEX IF NOT EXISTS event_reviews_created_by_idx
+            ON event_reviews (created_by)
+            """
+        )
+
+        cassandra_session.execute(
+            """
+            CREATE INDEX IF NOT EXISTS event_reviews_id_idx
+            ON event_reviews (id)
+            """
+        )
+
         print("Cassandra ready", file=sys.stderr)
         break
     except Exception as e:
@@ -159,6 +190,23 @@ CREATE_SESSION_SCRIPT = redis_client.register_script(
     return 1
     """
 )
+
+def parse_include(include: str | None) -> set[str]:
+    if include is None:
+        return set()
+    return {item.strip() for item in include.split(",") if item.strip()}
+
+
+def attach_includes_to_event(event: dict[str, Any], include: str | None) -> dict[str, Any]:
+    include_values = parse_include(include)
+
+    if "reactions" in include_values:
+        event = attach_reactions(event)
+
+    if "reviews" in include_values:
+        event = attach_reviews_summary(event)
+
+    return event
 
 def now_rfc3339() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
@@ -652,8 +700,7 @@ def get_events(
         cursor = cursor.limit(limit_value)
 
     events = [format_event(doc) for doc in cursor]
-    if include == "reactions":
-        events = [attach_reactions(event) for event in events]
+    events = [attach_includes_to_event(event, include) for event in events]
 
     response = JSONResponse(content={"events": events, "count": len(events)}, status_code=status.HTTP_200_OK)
     maybe_attach_existing_session_cookie(response, x_session_id)
@@ -678,8 +725,7 @@ def get_event(
         return response
 
     result = format_event(document)
-    if include == "reactions":
-        result = attach_reactions(result)
+    result = attach_includes_to_event(result, include)
 
     response = JSONResponse(content=result, status_code=status.HTTP_200_OK)
     maybe_attach_existing_session_cookie(response, x_session_id)
@@ -903,8 +949,7 @@ def get_user_events(
         cursor = cursor.limit(limit_value)
 
     events = [format_event(doc) for doc in cursor]
-    if include == "reactions":
-        events = [attach_reactions(event) for event in events]
+    events = [attach_includes_to_event(event, include) for event in events]
 
     response = JSONResponse(content={"events": events, "count": len(events)}, status_code=status.HTTP_200_OK)
     maybe_attach_existing_session_cookie(response, x_session_id)
@@ -972,6 +1017,309 @@ def dislike_event(
 ) -> Response:
     return react_to_event(event_id, -1, x_session_id)
 
+def find_event_or_error(event_id: str, sid: str | None) -> tuple[dict[str, Any] | None, JSONResponse | None]:
+    if not ObjectId.is_valid(event_id):
+        return None, json_error("Event not found", status.HTTP_404_NOT_FOUND, sid)
+
+    event = events_collection.find_one({"_id": ObjectId(event_id)})
+    if event is None:
+        return None, json_error("Event not found", status.HTTP_404_NOT_FOUND, sid)
+
+    return event, None
+
+
+def user_review_exists(event_id: str, user_id: str) -> bool:
+    statement = SimpleStatement(
+        """
+        SELECT id FROM event_reviews
+        WHERE event_id = %s AND created_by = %s
+        ALLOW FILTERING
+        """,
+        consistency_level=get_cassandra_consistency(),
+    )
+    rows = cassandra_session.execute(statement, (event_id, user_id))
+    return rows.one() is not None
+
+
+@app.post("/events/{event_id}/reviews")
+async def create_event_review(
+    request: Request,
+    event_id: str,
+    x_session_id: str | None = Cookie(default=None, alias=COOKIE_NAME),
+) -> Response:
+    sid = maybe_refresh_post_session(x_session_id)
+    user_id = authorized_user_id_from_session(sid)
+
+    if sid is None or user_id is None:
+        return Response(content=b"", status_code=status.HTTP_401_UNAUTHORIZED)
+
+    event, error = find_event_or_error(event_id, sid)
+    if error is not None:
+        return error
+
+    body = parse_json_body(await request.body())
+    if body is None:
+        return json_error('invalid "comment" field', status.HTTP_400_BAD_REQUEST, sid)
+
+    comment = validate_review_comment(body.get("comment"))
+    if comment is None:
+        return json_error('invalid "comment" field', status.HTTP_400_BAD_REQUEST, sid)
+
+    rating = validate_review_rating(body.get("rating"))
+    if rating is None:
+        return json_error('invalid "rating" field', status.HTTP_400_BAD_REQUEST, sid)
+
+    if user_review_exists(event_id, user_id):
+        return json_error("Already exists", status.HTTP_409_CONFLICT, sid)
+
+    review_id = uuid.uuid4()
+    now = datetime.now(timezone.utc)
+
+    statement = SimpleStatement(
+        """
+        INSERT INTO event_reviews
+        (event_id, created_at, id, created_by, rating, comment, updated_at)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        """,
+        consistency_level=get_cassandra_consistency(),
+    )
+    cassandra_session.execute(
+        statement,
+        (event_id, now, review_id, user_id, rating, comment, now),
+    )
+
+    save_reviews_cache(event.get("title", ""))
+
+    response = JSONResponse(content={"id": str(review_id)}, status_code=status.HTTP_201_CREATED)
+    set_session_cookie(response, sid)
+    return response
+
+
+@app.get("/events/{event_id}/reviews", response_model=None)
+def get_event_reviews(
+    event_id: str,
+    limit: str | None = None,
+    offset: str | None = None,
+    x_session_id: str | None = Cookie(default=None, alias=COOKIE_NAME),
+):
+    limit_value, err = parse_uint_param(limit, "limit", x_session_id)
+    if err is not None:
+        return err
+
+    offset_value, err = parse_uint_param(offset, "offset", x_session_id)
+    if err is not None:
+        return err
+
+    event, error = find_event_or_error(event_id, x_session_id)
+    if error is not None:
+        return error
+
+    statement = SimpleStatement(
+        "SELECT * FROM event_reviews WHERE event_id = %s",
+        consistency_level=get_cassandra_consistency(),
+    )
+    rows = list(cassandra_session.execute(statement, (event_id,)))
+
+    start = offset_value or 0
+    end = None if not limit_value else start + limit_value
+
+    reviews = [format_review(row) for row in rows[start:end]]
+
+    response = JSONResponse(content={"reviews": reviews, "count": len(reviews)}, status_code=status.HTTP_200_OK)
+    maybe_attach_existing_session_cookie(response, x_session_id)
+    return response
+
+
+@app.patch("/events/{event_id}/reviews/{review_id}")
+async def patch_event_review(
+    request: Request,
+    event_id: str,
+    review_id: str,
+    x_session_id: str | None = Cookie(default=None, alias=COOKIE_NAME),
+) -> Response:
+    sid = maybe_refresh_post_session(x_session_id)
+    user_id = authorized_user_id_from_session(sid)
+
+    if sid is None or user_id is None:
+        return Response(content=b"", status_code=status.HTTP_401_UNAUTHORIZED)
+
+    event, error = find_event_or_error(event_id, sid)
+    if error is not None:
+        return error
+
+    try:
+        parsed_review_id = uuid.UUID(review_id)
+    except ValueError:
+        return json_error("Event not found", status.HTTP_404_NOT_FOUND, sid)
+
+    statement = SimpleStatement(
+        """
+        SELECT * FROM event_reviews
+        WHERE event_id = %s AND id = %s
+        ALLOW FILTERING
+        """,
+        consistency_level=get_cassandra_consistency(),
+    )
+    row = cassandra_session.execute(statement, (event_id, parsed_review_id)).one()
+
+    if row is None or row.created_by != user_id:
+        return json_error("Event not found", status.HTTP_404_NOT_FOUND, sid)
+
+    body = parse_json_body(await request.body())
+    if body is None:
+        return json_error('invalid "body" field', status.HTTP_400_BAD_REQUEST, sid)
+
+    new_comment = row.comment
+    new_rating = int(row.rating)
+
+    if "comment" in body:
+        comment = validate_review_comment(body.get("comment"))
+        if comment is None:
+            return json_error('invalid "comment" field', status.HTTP_400_BAD_REQUEST, sid)
+        new_comment = comment
+
+    if "rating" in body:
+        rating = validate_review_rating(body.get("rating"))
+        if rating is None:
+            return json_error('invalid "rating" field', status.HTTP_400_BAD_REQUEST, sid)
+        new_rating = rating
+
+    update_statement = SimpleStatement(
+        """
+        UPDATE event_reviews
+        SET comment = %s, rating = %s, updated_at = %s
+        WHERE event_id = %s AND created_at = %s AND id = %s
+        """,
+        consistency_level=get_cassandra_consistency(),
+    )
+    cassandra_session.execute(
+        update_statement,
+        (
+            new_comment,
+            new_rating,
+            datetime.now(timezone.utc),
+            event_id,
+            row.created_at,
+            parsed_review_id,
+        ),
+    )
+
+    save_reviews_cache(event.get("title", ""))
+
+    return empty_response(status.HTTP_204_NO_CONTENT, sid)
+
+
+def reviews_cache_key(title: str) -> str:
+    title_hash = hashlib.md5(title.encode("utf-8")).hexdigest()
+    return f"event:{title_hash}:reviews"
+
+
+def zero_reviews_summary() -> dict[str, int | float]:
+    return {"count": 0, "rating": 0.0}
+
+
+def get_review_event_ids_by_title(title: str) -> list[str]:
+    docs = events_collection.find({"title": title}, {"_id": 1})
+    return [str(doc["_id"]) for doc in docs]
+
+
+def round_rating(value: float) -> float:
+    return round(value + 1e-8, 1)
+
+
+def get_reviews_summary_from_cassandra(event_ids: list[str]) -> dict[str, int | float]:
+    if not event_ids:
+        return zero_reviews_summary()
+
+    total_count = 0
+    rating_sum = 0
+
+    statement = SimpleStatement(
+        "SELECT rating FROM event_reviews WHERE event_id = %s",
+        consistency_level=get_cassandra_consistency(),
+    )
+
+    for event_id in event_ids:
+        rows = cassandra_session.execute(statement, (event_id,))
+        for row in rows:
+            total_count += 1
+            rating_sum += int(row.rating)
+
+    if total_count == 0:
+        return zero_reviews_summary()
+
+    return {
+        "count": total_count,
+        "rating": round_rating(rating_sum / total_count),
+    }
+
+
+def get_reviews_summary_by_title(title: str) -> dict[str, int | float]:
+    key = reviews_cache_key(title)
+
+    try:
+        cached = redis_client.hgetall(key)
+    except redis.ResponseError:
+        redis_client.delete(key)
+        cached = {}
+
+    if cached:
+        return {
+            "count": int(cached.get("count", 0)),
+            "rating": float(cached.get("rating", 0.0)),
+        }
+
+    event_ids = get_review_event_ids_by_title(title)
+    summary = get_reviews_summary_from_cassandra(event_ids)
+
+    if int(summary["count"]) > 0:
+        redis_client.hset(key, mapping=summary)
+        redis_client.expire(key, APP_EVENT_REVIEWS_TTL)
+
+    return summary
+
+
+def save_reviews_cache(title: str) -> None:
+    event_ids = get_review_event_ids_by_title(title)
+    summary = get_reviews_summary_from_cassandra(event_ids)
+
+    key = reviews_cache_key(title)
+    redis_client.delete(key)
+    redis_client.hset(key, mapping=summary)
+    redis_client.expire(key, APP_EVENT_REVIEWS_TTL)
+
+
+def attach_reviews_summary(event: dict[str, Any]) -> dict[str, Any]:
+    event["reviews"] = get_reviews_summary_by_title(event.get("title", ""))
+    return event
+
+
+def format_review(row: Any) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "event_id": row.event_id,
+        "comment": row.comment,
+        "created_at": row.created_at.replace(tzinfo=timezone.utc).isoformat(),
+        "created_by": row.created_by,
+        "rating": int(row.rating),
+        "updated_at": row.updated_at.replace(tzinfo=timezone.utc).isoformat(),
+    }
+
+
+def validate_review_comment(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if len(value) > 300:
+        return None
+    return value
+
+
+def validate_review_rating(value: Any) -> int | None:
+    if not isinstance(value, int):
+        return None
+    if value < 1 or value > 5:
+        return None
+    return value
 
 if __name__ == "__main__":
     uvicorn.run(app, host=APP_HOST, port=APP_PORT)
